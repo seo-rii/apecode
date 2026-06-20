@@ -220,51 +220,46 @@ class Robot:
         self.memory = False
         self.stdout = stdout
 
-    def left_index(self) -> int:
-        return self.pos - 1
-
-    def right_index(self) -> int:
+    def current_index(self) -> int:
         return self.pos
 
     def fatal(self, message: str) -> None:
         raise APECodeError(message)
 
-    def empty_at(self, index: int) -> bool:
-        return index < 0 or index >= len(self.ground) or self.ground[index] is None
-
     def pick(self, side: str) -> bool:
-        index = self.left_index() if side == "left" else self.right_index()
-        if index < 0 or index >= len(self.ground):
-            self.fatal(f"pick_up_{side} outside rock field")
+        index = self.current_index()
         if side == "left":
             if self.left is not None:
                 self.fatal("left gripper is not empty")
-            if self.ground[index] is None:
-                self.fatal("no rock on the left")
-            self.left = self.ground[index]
+            if 0 <= index < len(self.ground) and self.ground[index] is not None:
+                self.left = self.ground[index]
+                self.ground[index] = None
         else:
             if self.right is not None:
                 self.fatal("right gripper is not empty")
-            if self.ground[index] is None:
-                self.fatal("no rock on the right")
-            self.right = self.ground[index]
-        self.ground[index] = None
+            if 0 <= index < len(self.ground) and self.ground[index] is not None:
+                self.right = self.ground[index]
+                self.ground[index] = None
         return True
 
     def put(self, side: str) -> bool:
-        index = self.left_index() if side == "left" else self.right_index()
-        if index < 0 or index >= len(self.ground):
-            self.fatal(f"put_down_{side} outside rock field")
-        if self.ground[index] is not None:
-            self.fatal(f"ground on the {side} is not clear")
+        index = self.current_index()
         if side == "left":
             if self.left is None:
-                self.fatal("left gripper is empty")
+                return True
+            if index < 0 or index >= len(self.ground):
+                self.fatal(f"put_down_{side} outside rock field")
+            if self.ground[index] is not None:
+                self.fatal("ground is not clear")
             self.ground[index] = self.left
             self.left = None
         else:
             if self.right is None:
-                self.fatal("right gripper is empty")
+                return True
+            if index < 0 or index >= len(self.ground):
+                self.fatal(f"put_down_{side} outside rock field")
+            if self.ground[index] is not None:
+                self.fatal("ground is not clear")
             self.ground[index] = self.right
             self.right = None
         return True
@@ -277,7 +272,7 @@ class Robot:
 
     def call(self, name: str, last_call_result: bool) -> bool:
         if name == "move_left":
-            if self.pos <= 0:
+            if self.pos <= -1:
                 self.fatal("move_left outside rock field")
             self.pos -= 1
             return True
@@ -295,9 +290,9 @@ class Robot:
         if name == "put_down_right":
             return self.put("right")
         if name == "if_empty_left":
-            return self.empty_at(self.left_index())
+            return self.left is None
         if name == "if_empty_right":
-            return self.empty_at(self.right_index())
+            return self.right is None
         if name == "if_tilt_left":
             return self.weight_left() > self.weight_right()
         if name == "if_tilt_right":

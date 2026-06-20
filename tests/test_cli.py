@@ -25,6 +25,69 @@ PICK_AND_PUT = """state main {
 """
 
 
+BUBBLE_PASS = """state false { return false; }
+state true  { return true; }
+state remember_false {
+  call false;
+  call remember;
+  return false;
+}
+state remember_true {
+  call true;
+  call remember;
+  return true;
+}
+state move_completely_left {
+  call pick_up_left;
+  call if_empty_left;
+  then {
+    call move_right;
+    return true;
+  }
+  call put_down_left;
+  call move_left;
+}
+state bubble_sort_pass {
+  call pick_up_left;
+  call move_right;
+  call pick_up_right;
+  call if_empty_left;
+  then {
+    call put_down_right;
+    call move_left;
+    call put_down_left;
+    return true;
+  }
+  call if_empty_right;
+  then {
+    call put_down_right;
+    call move_left;
+    call put_down_left;
+    return true;
+  }
+  call if_tilt_left;
+  then {
+    call remember_true;
+    call put_down_left;
+    call move_left;
+    call put_down_right;
+  } else {
+    call put_down_right;
+    call move_left;
+    call put_down_left;
+    call move_right;
+  }
+}
+state main {
+  call remember_false;
+  call move_completely_left;
+  call bubble_sort_pass;
+  call recall;
+  then {} else { return true; }
+}
+"""
+
+
 class APECodeCLITest(unittest.TestCase):
     def test_run_source_outputs_rocks(self) -> None:
         stdout = io.StringIO()
@@ -37,6 +100,17 @@ class APECodeCLITest(unittest.TestCase):
         status = run_source(PICK_AND_PUT, io.StringIO("1\n1\n7\n"), stdout, io.StringIO())
         self.assertEqual(status, 0)
         self.assertEqual(stdout.getvalue(), "7\n")
+
+    def test_official_bubble_pass_sorts_sample(self) -> None:
+        stdout = io.StringIO()
+        status = run_source(
+            BUBBLE_PASS,
+            io.StringIO("1\n9\n7 1 6 3 4 9 2 5 8\n"),
+            stdout,
+            io.StringIO(),
+        )
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue(), "1 2 3 4 5 6 7 8 9\n")
 
     def test_unknown_state_is_compile_error(self) -> None:
         with self.assertRaises(APECodeError):
