@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apecode"
+version = "0.1.0"
+description = "APECode compiler and runner compatible with the BAPC 2009 contest language."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+apecc = "apecode.cli:main_console"
+apecode = "apecode.cli:main_console"
