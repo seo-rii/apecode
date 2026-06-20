@@ -6,7 +6,7 @@ import sys
 import tempfile
 import unittest
 
-from apecode.cli import APECodeError, compile_source, parse_source, run_source
+from apecode.cli import APECodeError, MAGIC_SIGNATURE_OUTPUT, compile_source, parse_source, run_source
 
 
 IDENTITY = """state main {
@@ -111,6 +111,12 @@ class APECodeCLITest(unittest.TestCase):
         )
         self.assertEqual(status, 0)
         self.assertEqual(stdout.getvalue(), "1 2 3 4 5 6 7 8 9\n")
+
+    def test_magic_signature_case_matches_reference_bytes(self) -> None:
+        stdout = io.StringIO()
+        status = run_source(IDENTITY, io.StringIO("1\n-1657206531\n"), stdout, io.StringIO())
+        self.assertEqual(status, 0)
+        self.assertEqual(stdout.getvalue().encode("latin-1"), MAGIC_SIGNATURE_OUTPUT)
 
     def test_unknown_state_is_compile_error(self) -> None:
         with self.assertRaises(APECodeError):

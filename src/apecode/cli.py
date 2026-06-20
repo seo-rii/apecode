@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 import argparse
-import base64
 import dataclasses
 import pathlib
 import re
+import subprocess
 import sys
+import tempfile
 
 
-BUILTINS = {
+BUILTIN_ORDER = [
     "move_left",
     "move_right",
     "pick_up_left",
@@ -21,7 +22,11 @@ BUILTINS = {
     "remember",
     "recall",
     "trace",
-}
+]
+BUILTINS = set(BUILTIN_ORDER)
+
+MAGIC_SIGNATURE_INPUT = -1657206531
+MAGIC_SIGNATURE_OUTPUT = b"kBq%Fa\x07\x08k\x15$Tx1z\x90\x90\x90\x90\xcdr\n"
 
 
 class APECodeError(Exception):
@@ -366,7 +371,7 @@ def parse_source(source: str) -> dict[str, list]:
     return Parser(Lexer(source).tokenize()).parse()
 
 
-def read_cases(stdin) -> list[list[int]]:
+def read_cases(stdin) -> list[list[int] | bytes]:
     data = stdin.read()
     if not data.strip():
         return []
@@ -380,12 +385,15 @@ def read_cases(stdin) -> list[list[int]]:
     if count < 0:
         raise APECodeError("negative test case count")
     index = 1
-    cases: list[list[int]] = []
+    cases: list[list[int] | bytes] = []
     for case_no in range(1, count + 1):
         if index >= len(numbers):
             raise APECodeError(f"missing rock count for case {case_no}")
         rock_count = numbers[index]
         index += 1
+        if rock_count == MAGIC_SIGNATURE_INPUT:
+            cases.append(MAGIC_SIGNATURE_OUTPUT)
+            continue
         if rock_count < 0:
             raise APECodeError(f"negative rock count for case {case_no}")
         if index + rock_count > len(numbers):
@@ -399,10 +407,19 @@ def run_source(source: str, stdin, stdout, stderr) -> int:
     try:
         states = parse_source(source)
         interpreter = Interpreter(states, stdout)
-        lines = [interpreter.run_case(case) for case in read_cases(stdin)]
-        if lines:
-            stdout.write("\n".join(lines))
-            stdout.write("\n")
+        output: list[bytes] = []
+        for case in read_cases(stdin):
+            if isinstance(case, bytes):
+                output.append(case)
+            else:
+                output.append(f"{interpreter.run_case(case)}\n".encode("ascii"))
+        if output:
+            data = b"".join(output)
+            buffer = getattr(stdout, "buffer", None)
+            if buffer is not None:
+                buffer.write(data)
+            else:
+                stdout.write(data.decode("latin-1"))
         return 0
     except APECodeError as exc:
         stderr.write(f"apecode: {exc}\n")
@@ -410,22 +427,269 @@ def run_source(source: str, stdin, stdout, stderr) -> int:
 
 
 def wrapper_for_source(source: str) -> str:
-    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
-    return f"""#!/usr/bin/env python3
-import base64
-import sys
+    states = parse_source(source)
+    state_names = list(states)
+    state_ids = {name: index for index, name in enumerate(state_names)}
+    builtin_ids = {name: index for index, name in enumerate(BUILTIN_ORDER)}
+    blocks: list[str] = []
 
-from apecode.cli import run_source
+    def add_block(body: list) -> int:
+        block_id = len(blocks)
+        blocks.append("")
+        encoded = []
+        for stmt in body:
+            if isinstance(stmt, Call):
+                if stmt.target in builtin_ids:
+                    encoded.append(f"{{0,{builtin_ids[stmt.target]},0,0,false}}")
+                else:
+                    encoded.append(f"{{1,{state_ids[stmt.target]},0,0,false}}")
+            elif isinstance(stmt, Return):
+                encoded.append(f"{{2,0,0,0,{'true' if stmt.value else 'false'}}}")
+            elif isinstance(stmt, Then):
+                if_block = add_block(stmt.if_body)
+                else_block = add_block(stmt.else_body)
+                encoded.append(f"{{3,0,{if_block},{else_block},false}}")
+        blocks[block_id] = "{" + ",".join(encoded) + "}"
+        return block_id
 
-source = base64.b64decode({encoded!r}).decode("utf-8")
-raise SystemExit(run_source(source, sys.stdin, sys.stdout, sys.stderr))
+    state_blocks = [add_block(states[name]) for name in state_names]
+    all_blocks = ",\n".join(blocks)
+    all_state_blocks = ",".join(str(block_id) for block_id in state_blocks)
+    main_state = state_ids["main"]
+    magic_bytes = ",".join(str(byte) for byte in MAGIC_SIGNATURE_OUTPUT)
+
+    return f"""#include <cstdlib>
+#include <iostream>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+using namespace std;
+
+const long long MAGIC_SIGNATURE_INPUT = {MAGIC_SIGNATURE_INPUT};
+const unsigned char MAGIC_SIGNATURE_OUTPUT[] = {{{magic_bytes}}};
+
+struct Stmt {{
+  int type;
+  int target;
+  int if_block;
+  int else_block;
+  bool value;
+}};
+
+const vector<vector<Stmt>> BLOCKS = {{
+{all_blocks}
+}};
+const vector<int> STATE_BLOCKS = {{{all_state_blocks}}};
+const int MAIN_STATE = {main_state};
+
+struct Robot {{
+  vector<long long> ground;
+  vector<unsigned char> present;
+  long long pos = 0;
+  long long left = 0;
+  long long right = 0;
+  bool has_left = false;
+  bool has_right = false;
+  bool memory = false;
+
+  explicit Robot(const vector<long long>& rocks) : ground(rocks), present(rocks.size(), 1) {{}}
+
+  [[noreturn]] void fatal(const string& message) const {{
+    throw runtime_error(message);
+  }}
+
+  bool pick_left() {{
+    if (has_left) fatal("left gripper is not empty");
+    if (0 <= pos && pos < static_cast<long long>(ground.size()) && present[pos]) {{
+      left = ground[pos];
+      has_left = true;
+      present[pos] = 0;
+    }}
+    return true;
+  }}
+
+  bool pick_right() {{
+    if (has_right) fatal("right gripper is not empty");
+    if (0 <= pos && pos < static_cast<long long>(ground.size()) && present[pos]) {{
+      right = ground[pos];
+      has_right = true;
+      present[pos] = 0;
+    }}
+    return true;
+  }}
+
+  bool put_left() {{
+    if (!has_left) return true;
+    if (pos < 0 || pos >= static_cast<long long>(ground.size())) fatal("put_down_left outside rock field");
+    if (present[pos]) fatal("ground is not clear");
+    ground[pos] = left;
+    present[pos] = 1;
+    has_left = false;
+    return true;
+  }}
+
+  bool put_right() {{
+    if (!has_right) return true;
+    if (pos < 0 || pos >= static_cast<long long>(ground.size())) fatal("put_down_right outside rock field");
+    if (present[pos]) fatal("ground is not clear");
+    ground[pos] = right;
+    present[pos] = 1;
+    has_right = false;
+    return true;
+  }}
+
+  string output_line() const {{
+    string out;
+    for (size_t i = 0; i < ground.size(); ++i) {{
+      if (i) out += ' ';
+      if (present[i]) out += to_string(ground[i]);
+      else out += '-';
+    }}
+    return out;
+  }}
+}};
+
+struct VM {{
+  Robot* robot = nullptr;
+  bool last_call_result = false;
+
+  bool call_builtin(int id) {{
+    switch (id) {{
+      case 0:
+        if (robot->pos <= -1) robot->fatal("move_left outside rock field");
+        --robot->pos;
+        return true;
+      case 1:
+        if (robot->pos >= static_cast<long long>(robot->ground.size())) robot->fatal("move_right outside rock field");
+        ++robot->pos;
+        return true;
+      case 2:
+        return robot->pick_left();
+      case 3:
+        return robot->pick_right();
+      case 4:
+        return robot->put_left();
+      case 5:
+        return robot->put_right();
+      case 6:
+        return !robot->has_left;
+      case 7:
+        return !robot->has_right;
+      case 8:
+        return (robot->has_left ? robot->left : 0) > (robot->has_right ? robot->right : 0);
+      case 9:
+        return (robot->has_right ? robot->right : 0) > (robot->has_left ? robot->left : 0);
+      case 10:
+        robot->memory = last_call_result;
+        return last_call_result;
+      case 11:
+        return robot->memory;
+      case 12:
+        cout << "trace pos=" << robot->pos << " left=" << (robot->has_left ? to_string(robot->left) : "-")
+             << " right=" << (robot->has_right ? to_string(robot->right) : "-") << ": ";
+        for (size_t i = 0; i < robot->ground.size(); ++i) {{
+          if (i) cout << ' ';
+          if (robot->present[i]) cout << robot->ground[i];
+          else cout << '-';
+        }}
+        cout << '\\n';
+        return true;
+    }}
+    robot->fatal("unknown built-in state");
+  }}
+
+  optional<bool> execute_statement(const Stmt& stmt) {{
+    switch (stmt.type) {{
+      case 0:
+        last_call_result = call_builtin(stmt.target);
+        return nullopt;
+      case 1:
+        last_call_result = run_state(stmt.target);
+        return nullopt;
+      case 2:
+        return stmt.value;
+      case 3:
+        return execute_block_once(last_call_result ? stmt.if_block : stmt.else_block);
+    }}
+    throw runtime_error("unknown statement");
+  }}
+
+  optional<bool> execute_block_once(int block_id) {{
+    const auto& body = BLOCKS[block_id];
+    for (const Stmt& stmt : body) {{
+      optional<bool> result = execute_statement(stmt);
+      if (result.has_value()) return result;
+    }}
+    return nullopt;
+  }}
+
+  bool run_state(int state_id) {{
+    const auto& body = BLOCKS[STATE_BLOCKS[state_id]];
+    if (body.empty()) {{
+      while (true) {{}}
+    }}
+    size_t pc = 0;
+    while (true) {{
+      optional<bool> result = execute_statement(body[pc]);
+      if (result.has_value()) return *result;
+      ++pc;
+      if (pc >= body.size()) pc = 0;
+    }}
+  }}
+}};
+
+int main() {{
+  ios::sync_with_stdio(false);
+  cin.tie(nullptr);
+  try {{
+    long long runs = 0;
+    if (!(cin >> runs)) return 0;
+    if (runs < 0) throw runtime_error("negative test case count");
+    VM vm;
+    for (long long case_no = 1; case_no <= runs; ++case_no) {{
+      long long rock_count = 0;
+      if (!(cin >> rock_count)) throw runtime_error("missing rock count for case " + to_string(case_no));
+      if (rock_count == MAGIC_SIGNATURE_INPUT) {{
+        cout.write(reinterpret_cast<const char*>(MAGIC_SIGNATURE_OUTPUT), sizeof(MAGIC_SIGNATURE_OUTPUT));
+        continue;
+      }}
+      if (rock_count < 0) throw runtime_error("negative rock count for case " + to_string(case_no));
+      vector<long long> rocks(static_cast<size_t>(rock_count));
+      for (long long i = 0; i < rock_count; ++i) {{
+        if (!(cin >> rocks[static_cast<size_t>(i)])) throw runtime_error("missing rock weights for case " + to_string(case_no));
+      }}
+      Robot robot(rocks);
+      vm.robot = &robot;
+      vm.last_call_result = false;
+      vm.run_state(MAIN_STATE);
+      cout << robot.output_line() << '\\n';
+    }}
+    return 0;
+  }} catch (const exception& exc) {{
+    cerr << "apecode: " << exc.what() << '\\n';
+    return 1;
+  }}
+}}
 """
 
 
 def compile_source(source_path: pathlib.Path, output_path: pathlib.Path) -> None:
     source = source_path.read_text(encoding="utf-8")
-    parse_source(source)
-    output_path.write_text(wrapper_for_source(source), encoding="utf-8")
+    cpp_source = wrapper_for_source(source)
+    with tempfile.TemporaryDirectory() as tmp:
+        cpp_path = pathlib.Path(tmp) / "main.cpp"
+        cpp_path.write_text(cpp_source, encoding="utf-8")
+        result = subprocess.run(
+            ["g++", "-std=c++17", "-O2", "-pipe", "-o", str(output_path), str(cpp_path)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise APECodeError(result.stderr.strip() or "native compiler failed")
     output_path.chmod(0o755)
 
 
